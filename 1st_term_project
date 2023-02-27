@@ -1,0 +1,541 @@
+#include <LiquidCrystal.h>
+
+#include <TimerFive.h>
+//lcd
+LiquidCrystal lcd(46,47,48,49,50,51);
+String lcdString = ""; 
+
+//RGB센서
+#include <TimerFive.h>
+#include <Wire.h>
+#include <Adafruit_TCS34725.h>
+#define LED 13
+uint16_t r, g, b, c;
+Adafruit_TCS34725 tcs = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_24MS, TCS34725_GAIN_1X);
+
+// 모터1
+#define ENC1_CHA  18
+#define ENC1_CHB  2
+#define M1_DIR1   8
+#define M1_DIR2   12
+#define M1_PWM    10
+
+// 모터2
+#define ENC2_CHA 19
+#define ENC2_CHB 3
+#define M2_DIR1 6
+#define M2_DIR2 7
+#define M2_PWM 9
+// IR
+#define ir1 28
+#define ir2 29
+#define ir3 30
+#define ir4 31
+
+// 초음파
+#define TRIG 41
+#define ECHO 40
+
+#define TRIG1 43
+#define ECHO1 42
+
+#define TRIG2 25
+#define ECHO2 24
+
+double distance;
+double distance1;
+double distance2;
+
+int a = 0;
+int ir_count=0;
+
+const float Kp = 0.8;
+const float Ki = 0.5;
+const float Kd = 0.1;
+
+int e1cnt = 0;
+int e1cnt_k = 0, e1cnt_k_1 = 0, d_e1cnt = 0;
+
+int e2cnt = 0;
+int e2cnt_k = 0, e2cnt_k_1 = 0, d_e2cnt = 0;
+
+float m1speed = 0;
+float m1_ref_spd = 50;
+float m1_err_spd = 0;
+float m1_err_spd_k_1 = 0;
+float m1_derr_spd = 0;
+float m1_err_sum = 0;
+
+float m2speed = 0;
+float m2_ref_spd = 50;
+float m2_err_spd = 0;
+float m2_err_spd_k_1 = 0;
+float m2_derr_spd = 0;
+float m2_err_sum = 0;
+
+float ctrl_up = 0;
+float ctrl_ui = 0;
+float ctrl_ud = 0;
+
+float ctrl_up2 = 0;
+float ctrl_ui2 = 0;
+float ctrl_ud2 = 0;
+
+int ctrl_u = 0;
+int ipwm_u = 0;
+bool t5_flag = 0;
+
+int ctrl_u2 = 0;
+int ipwm_u2 = 0;
+bool t5_flag2 = 0;
+
+long current;
+long previous = 0;
+
+int flag = 0;
+
+int stage_count =0;
+
+int enAPos1 =0;
+int in_mval1= 0;
+float angle1 =0.0;
+
+int enAPos2 =0;
+int in_mval2= 0;
+float angle2 =0.0;
+
+int count_cnt=0;
+int wt=0;
+
+void T5ISR() {
+  t5_flag = 1;
+  t5_flag2 = 1;
+
+  e1cnt_k = e1cnt;
+  e2cnt_k = e2cnt;
+
+  d_e1cnt = e1cnt_k - e1cnt_k_1; //delta_error
+  d_e2cnt = e2cnt_k - e2cnt_k_1; //delta_error
+
+  e1cnt_k_1 = e1cnt_k;
+  e2cnt_k_1 = e2cnt_k;
+
+  SpeedcontrolM1();
+  SpeedcontrolM2();
+
+  flag++;
+
+  if (flag == 2) {
+    flag = 0;
+  }
+  //Serial.println(flag);
+}
+
+void Enc1chA_ISR() {
+  if (digitalRead(ENC1_CHA) == HIGH) {
+    if (digitalRead(ENC1_CHB) == LOW) e1cnt--;
+    else e1cnt++;
+  }
+  else {
+    if (digitalRead(ENC1_CHB) == HIGH) e1cnt--;
+    else e1cnt++;
+  }
+}
+
+void Enc1chB_ISR() {
+  if (digitalRead(ENC1_CHB) == HIGH) {
+    if (digitalRead(ENC1_CHA) == HIGH) e1cnt--;
+    else e1cnt++;
+  }
+  else {
+    if (digitalRead(ENC1_CHA) == LOW) e1cnt--;
+    else e1cnt++;
+  }
+}
+
+void Enc2chA_ISR() {
+  if (digitalRead(ENC2_CHA) == HIGH) {
+    if (digitalRead(ENC2_CHB) == LOW) e2cnt--;
+    else e2cnt++;
+  }
+  else {
+    if (digitalRead(ENC2_CHB) == HIGH) e2cnt--;
+    else e2cnt++;
+  }
+}
+
+void Enc2chB_ISR() {
+  if (digitalRead(ENC2_CHB) == HIGH) {
+    if (digitalRead(ENC2_CHA) == HIGH) e2cnt--;
+    else e2cnt++;
+  }
+  else {
+    if (digitalRead(ENC2_CHA) == LOW) e2cnt--;
+    else e2cnt++;
+  }
+}
+
+void SpeedcontrolM1() {
+  if (t5_flag) {
+    t5_flag = 0;
+    m1speed = d_e1cnt * 10 / 11; // *1500/11/50
+
+    //Error
+    m1_err_spd = m1_ref_spd - m1speed;
+    m1_derr_spd = m1_err_spd - m1_err_spd_k_1;
+    m1_err_sum = m1_err_sum + m1_err_spd;
+    m1_err_spd_k_1 = m1_err_spd;
+
+    //PID-Controller
+    ctrl_up = Kp * m1_err_spd;
+    ctrl_ui = Ki * m1_err_sum;
+    ctrl_ud = Kd * m1_derr_spd;
+    ctrl_u = (int)(ctrl_up + ctrl_ud + ctrl_ui);
+
+    if (ctrl_u >= 0) {
+      digitalWrite(M1_DIR1, LOW);
+      digitalWrite(M1_DIR2, HIGH); //ccw
+      if (ctrl_u > 255) ipwm_u = 255;
+      else ipwm_u = (int)ctrl_u;
+    }
+    else {
+      digitalWrite(M1_DIR1, HIGH);
+      digitalWrite(M1_DIR2, LOW); //cw
+      if (ctrl_u < -255) ipwm_u = 255;
+      else ipwm_u = (int)ctrl_u * (-1);
+    }
+
+    analogWrite(M1_PWM, ipwm_u);
+
+    //    Serial.print(m1_ref_spd);
+    //    Serial.print(",");
+    //    Serial.println(m1speed);
+  }
+}
+
+void SpeedcontrolM2() {
+  if (t5_flag2) {
+    t5_flag2 = 0;
+    m2speed = d_e2cnt * 10 / 11; // *1500/11/50
+
+    //Error
+    m2_err_spd = m2_ref_spd - m2speed;
+    m2_derr_spd = m2_err_spd - m2_err_spd_k_1;
+    m2_err_sum = m2_err_sum + m2_err_spd;
+    m2_err_spd_k_1 = m2_err_spd;
+
+    //PID-Controller
+    ctrl_up2 = Kp * m2_err_spd;
+    ctrl_ui2 = Ki * m2_err_sum;
+    ctrl_ud2 = Kd * m2_derr_spd;
+    ctrl_u2 = (int)(ctrl_up2 + ctrl_ud2 + ctrl_ui2);
+
+    if (ctrl_u2 >= 0) {
+      digitalWrite(M2_DIR1, LOW);
+      digitalWrite(M2_DIR2, HIGH); //ccw
+      if (ctrl_u2 > 255) ipwm_u2 = 255;
+      else ipwm_u2 = (int)ctrl_u2;
+    }
+    else {
+      digitalWrite(M2_DIR1, HIGH);
+      digitalWrite(M2_DIR2, LOW); //cw
+      if (ctrl_u2 < -255) ipwm_u2 = 255;
+      else ipwm_u2 = (int)ctrl_u2 * (-1);
+    }
+
+    analogWrite(M2_PWM, ipwm_u2);
+
+    //    Serial.print(m2_ref_spd);
+    //    Serial.print(",");
+    //    Serial.println(m2speed);
+  }
+}
+
+void go(int a, int b) { // 모터가 한쪽이 반대 방향으로 있어 속도를 반대로 줘야 하니, 미리 함수로 반대로 주도록 만듬
+  m1_ref_spd = a;
+  m2_ref_spd = -b;
+}
+
+double tr0() // 정면 초음파를 사용하고 거리값을 받는 함수
+{
+  digitalWrite(TRIG, LOW);
+  digitalWrite(ECHO, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG, LOW);
+
+  unsigned long duration = pulseIn(ECHO, HIGH);
+  distance = (double)340 * duration / 20000;
+
+  Serial.print("distance:");
+  Serial.print(distance);
+  Serial.print(" ");
+
+  return distance;
+}
+
+double tr1() // 왼쪽 초음파를 사용하고 거리값을 받는 함수
+{
+  digitalWrite(TRIG1, LOW);
+  digitalWrite(ECHO1, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG1, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG1, LOW);
+
+  unsigned long duration1 = pulseIn(ECHO1, HIGH);
+  distance1 = (double)340 * duration1 / 20000;
+  Serial.print("distance1:");
+  Serial.print(distance1);
+  Serial.print(" ");
+
+  return distance1;
+}
+
+double tr2() // 오른쪽 초음파를 사용하고 거리값을 받는 함수
+{
+  digitalWrite(TRIG2, LOW);
+  digitalWrite(ECHO2, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG2, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG2, LOW);
+
+  unsigned long duration2 = pulseIn(ECHO2, HIGH);
+  distance2 = (double)340 * duration2 / 20000;
+   Serial.print("distance2: ");
+   Serial.print(distance2);
+   Serial.println(" ");
+
+  return distance2;
+}
+
+void odo(){
+  switch(count_cnt){ // odometry를 할 때 전진 좌회전 직진 좌회전 직진을 분할을 하기 위해서 switch문 사용
+
+    case 0:
+    go(20,20);
+    if(e1cnt > wt+3125){ //현재의 펄스가 2번 미션을 끝난 시점에서 3125펄스 더갔을 때 멈추도록함.
+      go(0,0);
+      delay(1000);
+      wt=e1cnt; //다시 현재의 펄스 값을 초기화 시켜준다.
+      count_cnt=1; //cas1로 넘어감
+    }
+    break;
+    
+    case 1:
+    go(-20,20);
+    if(e1cnt < wt-750){  //회전을 750펄스 가도록 함.
+      go(0,0);
+      delay(1000);
+      wt=e1cnt; 
+      count_cnt=2; //case2로 넘어감
+    }
+    break;
+    
+    case 2:
+    go(20,20);
+    if(e1cnt > wt+4600){ //현재의 펄스보다 4600펄스 더갔을 때 멈추도록함.
+      go(0,0);
+      delay(1000);
+      wt=e1cnt;
+      count_cnt=3;
+    }
+    break;
+    
+    case 3:
+    go(-20,20);
+    if(e1cnt < wt-720){ //회전을 720펄스 가도록 함.
+      go(0,0);
+      delay(1000);
+      wt=e1cnt;
+      count_cnt=4;
+    }
+    break;
+    
+    case 4:
+    go(20,20);
+    if(e1cnt > wt+1200){ //현재의 펄스보다 1200펄스 더갔을 때 멈추도록함.
+      go(0,0);
+      delay(1000);
+      wt=e1cnt;
+      count_cnt=5;
+    }
+    break;
+    
+  }
+}
+
+void waves(){
+  int turn=0;
+  while(1){
+  
+  go(20,20);
+
+  if(tr0() < 20 && tr1() > 30 && tr2() < 20){
+    go(0,20);
+    delay(3700);
+  }
+
+  else if((tr1() < 20 && tr2() > 30) && !(turn==2) || tr0() < 17){
+    turn++;
+    delay(500);
+    go(20,0);
+    delay(3800);
+    go(20,20);
+    delay(1500);
+  }
+
+
+  else if(tr2() < 6){
+    go(0,10);
+    delay(10);
+  }
+
+  else if(tr1() < 6){
+    go(10,0);
+    delay(10);
+  }
+
+  else{
+    
+  }
+
+  if ( digitalRead(ir1)==1 || digitalRead(ir2)==1 || digitalRead(ir3) == 1 || digitalRead(ir4) == 1){
+    go(0,0);
+    delay(10000);
+    stage_count=2;
+    wt=e1cnt;
+    return;
+  } 
+  
+  
+  }
+
+  
+    
+}
+
+
+void linetrace() {
+  if ( digitalRead(ir1)==1 && digitalRead(ir2)==1 && digitalRead(ir3) == 1 && digitalRead(ir4) == 1) // 1번미션 마지막에 멈추기 위해서 if로 먼저 사용하며 우선도를 높혀줌.
+  {
+    if (ir_count<1){ //처음으로 ir센서 4개가 들어오는 구간은 앞으로 지나간 다음 카운트를 함.
+      go(20,20);
+      delay(1000);
+      ir_count++;
+    }
+    else if (ir_count==1){ //ir센서 4개가 2번째로 들어가는 1번 미션 마지막에서는 멈추고 
+      go(0,0);
+      delay(1000); 
+      go(20,20);    //1번 미션 끝난 지점은 오른쪽 초음파가 안 막혀 있기에, 앞으로 조금 가게하여 2번미션을 할 수있는 환경을 만든다.
+      delay(1000); 
+      go(0,0);
+      delay(2000);  
+      stage_count=1; //stage_count를 1높이면서 loop문 switch에서 case1로 전환한다.
+      return;   // 함수를 종료
+    }
+  }
+
+   else if (digitalRead(ir2) == 0 && digitalRead(ir3) == 0){ //ir 2번과 3번이 라인에 안걸려 있으면 직진을 하게함.
+    go(30, 30);
+  }
+  else if (digitalRead(ir2) == 1 && digitalRead(ir3) == 1 && digitalRead(ir4)==1) { //교차로 구간에서 2,3,4번이 들어오면 왼쪽으로 확틀게 하여 라인을 잘타게함. 많이 틀어졌을 때 다시 돌아오게 함.
+    go(30, 10);
+  }
+  else if (digitalRead(ir1)==1 && digitalRead(ir2) == 1 && digitalRead(ir3) == 1 ) { //교차로 구간에서 1,2,3번이 들어오면 왼쪽으로 확틀게 하여 라인을 잘타게 한다. 많이 틀어졌을 때 다시 돌아오게 함.
+    go(10, 30);
+  }
+  else if (digitalRead(ir2) == 0 && digitalRead(ir3) == 1) { //왼쪽으로 틀어졌을 때 라인가운데로 오게함.
+    go(12, 0);
+  }
+  else if (digitalRead(ir2) == 1 && digitalRead(ir3) == 0) { //오른쪽으로 틀어졌을 때 라인 가운데로 오게함.
+    go(0, 12);
+  }
+ 
+}
+
+void getRawData_noDelay(uint16_t *r, uint16_t *g, uint16_t *b, uint16_t *c){
+*c = tcs.read16(TCS34725_CDATAL);
+*r = tcs.read16(TCS34725_RDATAL);
+*g = tcs.read16(TCS34725_GDATAL);
+*b = tcs.read16(TCS34725_BDATAL);
+}
+void setup() {
+  pinMode(ENC1_CHA, INPUT_PULLUP);
+  pinMode(ENC1_CHB, INPUT_PULLUP);
+  pinMode(M1_DIR1, OUTPUT);
+  pinMode(M1_DIR2, OUTPUT);
+  pinMode(M1_PWM, OUTPUT);
+
+  pinMode(ENC2_CHA, INPUT_PULLUP);
+  pinMode(ENC2_CHB, INPUT_PULLUP);
+  pinMode(M2_DIR1, OUTPUT);
+  pinMode(M2_DIR2, OUTPUT);
+  pinMode(M2_PWM, OUTPUT);
+
+  pinMode(ir1, INPUT);
+  pinMode(ir2, INPUT);
+  pinMode(ir3, INPUT);
+  pinMode(ir4, INPUT);
+
+  pinMode(TRIG, OUTPUT); 
+  pinMode(ECHO, INPUT);
+
+  pinMode(TRIG1, OUTPUT); 
+  pinMode(ECHO1, INPUT);
+
+  pinMode(TRIG2, OUTPUT);
+  pinMode(ECHO2, INPUT);
+  
+  pinMode(LED,OUTPUT);
+  
+  attachInterrupt(digitalPinToInterrupt(ENC1_CHA), Enc1chA_ISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC1_CHB), Enc1chB_ISR, CHANGE);
+
+  attachInterrupt(digitalPinToInterrupt(ENC2_CHA), Enc2chA_ISR, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC2_CHB), Enc2chB_ISR, CHANGE);
+
+  digitalWrite(M1_DIR1, LOW);
+  digitalWrite(M1_DIR2, HIGH);
+  analogWrite(M1_PWM, 0);
+
+  digitalWrite(M2_DIR1, LOW);
+  digitalWrite(M2_DIR2, HIGH);
+  analogWrite(M2_PWM, 0);
+
+  
+  
+  Serial.begin(115200);
+  Serial.setTimeout(50);
+  //  Serial.println("m1_ref_spd, m1speed, m2_ref_spd, m2speed");
+
+  Timer5.initialize(50000); //50msec,
+  Timer5.attachInterrupt(T5ISR); //T5ISR
+  
+  lcd.begin(16,2);
+  lcd.clear();
+  go(0,0);
+
+  
+}
+
+
+void loop() { //미션에 따라 하나씩 함수를 만들어 사용함, loop문 안을 깔끔하게 만들어 나중 오류가 나더라도 쉽게 고칠 수 있도록 함
+  
+  switch(stage_count){
+    
+    case 0:
+    linetrace(); // 1번 미션에 대한 함수
+    break;
+    
+    case 1:
+    waves(); // 2번 미션에 대한 함수 
+    break;
+    
+    case 2:
+    odo(); // 3번 미션에 대한 함수 
+    break;
+  }
+}
